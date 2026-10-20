@@ -8,7 +8,7 @@
  *   capturado, el botón izquierdo dispara (el derecho queda para apuntar).
  */
 
-export type ActionName = "jump" | "reset" | "toggleDebug" | "toggleMute" | "punch" | "kick" | "dodge" | "die";
+export type ActionName = "jump" | "reset" | "toggleDebug" | "toggleGraphics" | "toggleMute" | "punch" | "kick" | "dodge" | "die";
 
 const KEY_BINDINGS: Record<string, ActionName> = {
   Space: "jump",
@@ -18,6 +18,7 @@ const KEY_BINDINGS: Record<string, ActionName> = {
   KeyC: "dodge",
   KeyK: "die",
   KeyM: "toggleMute",
+  KeyG: "toggleGraphics",
   Backquote: "toggleDebug",
   F3: "toggleDebug",
   KeyP: "toggleDebug",
@@ -140,7 +141,7 @@ export class InputManager {
 
   /** Dispara una acción de flanco (botón táctil). */
   trigger(action: ActionName): void {
-    if (this.enabled || action === "toggleDebug") this.pressed.add(action);
+    if (this.enabled || action === "toggleDebug" || action === "toggleGraphics") this.pressed.add(action);
   }
 
   /** Devuelve true una sola vez por pulsación. */
@@ -175,8 +176,8 @@ export class InputManager {
       return;
     }
     const action = KEY_BINDINGS[e.code];
-    if (action === "toggleDebug") {
-      // El panel de debug funciona incluso fuera del juego.
+    if (action === "toggleDebug" || action === "toggleGraphics") {
+      // Los paneles de debug y gráficos funcionan incluso fuera del juego.
       if (!e.repeat) this.pressed.add(action);
       e.preventDefault();
       return;

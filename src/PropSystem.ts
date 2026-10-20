@@ -203,6 +203,8 @@ export class PropSystem {
     const pos = new THREE.Vector3();
     const quat = new THREE.Quaternion();
     const scl = new THREE.Vector3();
+    const propsSdfs: SplatEditSdf[] = [];
+    const buildingsSdfs: SplatEditSdf[] = [];
     for (const inst of layout.instances) {
       const info = layout.assets[inst.asset];
       if (!info) continue;
@@ -226,9 +228,20 @@ export class PropSystem {
           sdf.radius = scl.x;
           sdf.scale.set(1, 1, 1);
         }
-        (BUILDINGS.has(inst.asset) ? this.carveBuildings : this.carveProps).add(sdf);
+        if (BUILDINGS.has(inst.asset)) {
+          this.carveBuildings.add(sdf);
+          buildingsSdfs.push(sdf);
+        } else {
+          this.carveProps.add(sdf);
+          propsSdfs.push(sdf);
+        }
       }
     }
     scene.add(this.carveProps, this.carveBuildings);
+    this.carveProps.updateMatrixWorld(true);
+    this.carveBuildings.updateMatrixWorld(true);
+    // Pre-asignar la lista de SDFs evita que SplatMesh.update recorra los ~135 nodos cada frame.
+    this.carveProps.sdfs = propsSdfs;
+    this.carveBuildings.sdfs = buildingsSdfs;
   }
 }

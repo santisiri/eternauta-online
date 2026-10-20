@@ -24,6 +24,19 @@ export interface BoxObstacle {
   max: Vec3Like;
 }
 
+export type QualityPreset = "bajo" | "medio" | "alto" | "ultra" | "personalizado";
+
+export type ResolutionPreset = "nativa" | "1080p" | "900p" | "720p" | "540p" | "480p";
+
+export const RESOLUTION_HEIGHT_MAP: Record<ResolutionPreset, number> = {
+  nativa: 0,
+  "1080p": 1080,
+  "900p": 900,
+  "720p": 720,
+  "540p": 540,
+  "480p": 480,
+};
+
 export interface GameConfig {
   assets: {
     characterUrl: string;
@@ -91,6 +104,14 @@ export interface GameConfig {
     extSplats: boolean;
     /** Multiplicador del presupuesto de splats del LoD (1 = default de plataforma). */
     lodSplatScale: number;
+    /** Tamaño mínimo en píxeles de los splats del LoD (mayor = menos splats diminutos lejanos). */
+    lodRenderScale: number;
+    /** Radio máximo de las gaussianas en desvíos estándar (menor = menos overdraw en GPU). */
+    maxStdDev: number;
+    /** Opacidad mínima para descartar bordes transparentes de splats. */
+    minAlpha: number;
+    /** Intervalo mínimo entre ordenamientos de profundidad en ms. */
+    minSortIntervalMs: number;
   };
   world: {
     /** Altura del suelo invisible en el origen (m). */
@@ -226,6 +247,8 @@ export interface GameConfig {
     bloodColor: string;
     /** Segundos que duran las manchas de sangre y los impactos en el suelo. */
     decalLifetime: number;
+    /** Multiplicador de densidad de partículas de combate y pisadas (0.25 a 1). */
+    particleDensity: number;
     /** Sacudón de cámara por las pisadas de los cascarudos cercanos (0 = sin). */
     footstepShake: number;
     /** Retroceso del arma: cabeceo de la cámara por disparo (grados). */
@@ -249,16 +272,32 @@ export interface GameConfig {
     regenDelay: number;
   };
   render: {
+    /** Perfil general de calidad gráfica. */
+    qualityPreset: QualityPreset;
+    /** Resolución objetivo de salida (limita la altura máxima del framebuffer). */
+    resolutionPreset: ResolutionPreset;
+    /** Altura máxima del framebuffer en píxeles (0 = sin límite / nativa). */
+    maxResolutionHeight: number;
     /** Límite superior del devicePixelRatio. */
     maxPixelRatio: number;
     /** Escala de resolución interna (0.5 = mitad, look PS2). */
     renderScale: number;
+    /** Ajusta automáticamente la resolución interna para sostener `targetFps`. */
+    dynamicResolution: boolean;
+    /** FPS objetivo cuando `dynamicResolution` está activo. */
+    targetFps: number;
+    /** Escala mínima permitida por la resolución dinámica. */
+    minRenderScale: number;
+    /** Límite máximo de cuadros por segundo (0 = sin límite). */
+    maxFps: number;
     /** Escalado sin filtrado (pixelado) cuando renderScale < 1. */
     pixelated: boolean;
     exposure: number;
     background: string;
     filmGrain: boolean;
     vignette: boolean;
+    /** Corrección de color CSS en el canvas (desactivar ahorra una pasada de composición). */
+    colorGrading: boolean;
   };
   atmosphere: {
     snow: boolean;
@@ -351,6 +390,10 @@ export const defaultConfig: GameConfig = {
     lod: true,
     extSplats: false,
     lodSplatScale: 1,
+    lodRenderScale: 1.25,
+    maxStdDev: 2.45,
+    minAlpha: 0.004,
+    minSortIntervalMs: 16,
   },
   world: {
     // Plano ajustado por mínimos cuadrados a la densidad de splats del suelo
@@ -450,6 +493,7 @@ export const defaultConfig: GameConfig = {
     // Hemolinfa de insecto: verde amarillento; sobre la nieve se oscurece.
     bloodColor: "#7d8f1e",
     decalLifetime: 45,
+    particleDensity: 1,
     footstepShake: 1,
     recoilDeg: 0.35,
   },
@@ -467,13 +511,21 @@ export const defaultConfig: GameConfig = {
     regenDelay: 5,
   },
   render: {
+    qualityPreset: "alto",
+    resolutionPreset: "nativa",
+    maxResolutionHeight: 0,
     maxPixelRatio: 1.5,
     renderScale: 1,
+    dynamicResolution: false,
+    targetFps: 60,
+    minRenderScale: 0.55,
+    maxFps: 0,
     pixelated: false,
     exposure: 1,
     background: "#b9c0c6",
     filmGrain: true,
     vignette: true,
+    colorGrading: true,
   },
   atmosphere: {
     snow: true,
@@ -486,14 +538,113 @@ export const defaultConfig: GameConfig = {
 };
 
 /**
+ * Aplica un perfil de calidad gráfica predefinido sobre `config`.
+ */
+export function applyQualityPreset(config: GameConfig, preset: Exclude<QualityPreset, "personalizado">): void {
+  config.render.qualityPreset = preset;
+  switch (preset) {
+    case "bajo":
+      config.render.resolutionPreset = "720p";
+      config.render.maxResolutionHeight = 720;
+      config.render.maxPixelRatio = 1.0;
+      config.render.renderScale = 0.75;
+      config.render.filmGrain = false;
+      config.render.vignette = false;
+      config.render.colorGrading = false;
+      config.environment.lodSplatScale = 0.45;
+      config.environment.lodRenderScale = 2.2;
+      config.environment.maxStdDev = 2.0;
+      config.environment.minAlpha = 0.01;
+      config.environment.minSortIntervalMs = 32;
+      config.props.carveSplat = false;
+      config.props.carveBuildings = false;
+      config.atmosphere.snow = true;
+      config.atmosphere.snowCount = 1500;
+      config.effects.particleDensity = 0.4;
+      config.effects.decalLifetime = 15;
+      config.character.castShadowBlob = false;
+      break;
+    case "medio":
+      config.render.resolutionPreset = "900p";
+      config.render.maxResolutionHeight = 900;
+      config.render.maxPixelRatio = 1.25;
+      config.render.renderScale = 0.85;
+      config.render.filmGrain = false;
+      config.render.vignette = true;
+      config.render.colorGrading = false;
+      config.environment.lodSplatScale = 0.7;
+      config.environment.lodRenderScale = 1.6;
+      config.environment.maxStdDev = 2.25;
+      config.environment.minAlpha = 0.006;
+      config.environment.minSortIntervalMs = 24;
+      config.props.carveSplat = true;
+      config.props.carveBuildings = false;
+      config.atmosphere.snow = true;
+      config.atmosphere.snowCount = 3000;
+      config.effects.particleDensity = 0.7;
+      config.effects.decalLifetime = 30;
+      config.character.castShadowBlob = true;
+      break;
+    case "alto":
+      config.render.resolutionPreset = "nativa";
+      config.render.maxResolutionHeight = 0;
+      config.render.maxPixelRatio = 1.5;
+      config.render.renderScale = 1.0;
+      config.render.filmGrain = true;
+      config.render.vignette = true;
+      config.render.colorGrading = true;
+      config.environment.lodSplatScale = 1.0;
+      config.environment.lodRenderScale = 1.25;
+      config.environment.maxStdDev = 2.45;
+      config.environment.minAlpha = 0.004;
+      config.environment.minSortIntervalMs = 16;
+      config.props.carveSplat = true;
+      config.props.carveBuildings = false;
+      config.atmosphere.snow = true;
+      config.atmosphere.snowCount = 5000;
+      config.effects.particleDensity = 1.0;
+      config.effects.decalLifetime = 45;
+      config.character.castShadowBlob = true;
+      break;
+    case "ultra":
+      config.render.resolutionPreset = "nativa";
+      config.render.maxResolutionHeight = 0;
+      config.render.maxPixelRatio = 2.0;
+      config.render.renderScale = 1.0;
+      config.render.filmGrain = true;
+      config.render.vignette = true;
+      config.render.colorGrading = true;
+      config.environment.lodSplatScale = 1.5;
+      config.environment.lodRenderScale = 1.0;
+      config.environment.maxStdDev = 2.828;
+      config.environment.minAlpha = 0.002;
+      config.environment.minSortIntervalMs = 12;
+      config.props.carveSplat = true;
+      config.props.carveBuildings = false;
+      config.atmosphere.snow = true;
+      config.atmosphere.snowCount = 8000;
+      config.effects.particleDensity = 1.0;
+      config.effects.decalLifetime = 60;
+      config.character.castShadowBlob = true;
+      break;
+  }
+}
+
+/**
  * Ajustes para celulares y tablets: menos píxeles, menos partículas y sin
  * efectos de composición CSS (grano/filtros), que en GPUs móviles cuestan.
  * Spark ya reduce por su cuenta el presupuesto de splats del LoD en móviles.
  */
 export function applyMobileProfile(config: GameConfig): void {
   config.render.maxPixelRatio = Math.min(config.render.maxPixelRatio, 1.25);
+  config.render.maxResolutionHeight = config.render.maxResolutionHeight ? Math.min(config.render.maxResolutionHeight, 900) : 900;
+  config.render.resolutionPreset = "900p";
   config.render.filmGrain = false;
+  config.render.colorGrading = false;
+  config.environment.lodRenderScale = Math.max(config.environment.lodRenderScale, 1.6);
+  config.environment.maxStdDev = Math.min(config.environment.maxStdDev, 2.25);
   config.atmosphere.snowCount = Math.min(config.atmosphere.snowCount, 2500);
+  config.effects.particleDensity = Math.min(config.effects.particleDensity, 0.65);
   config.camera.distance = Math.max(config.camera.distance, 4.6);
 }
 
@@ -530,11 +681,24 @@ export function loadConfig(): GameConfig {
   } catch {
     // localStorage puede no estar disponible (modo privado): seguimos con defaults.
   }
-  // Overrides rápidos por URL: ?scale=1.2&renderScale=0.5
+  // Overrides rápidos por URL: ?quality=bajo&resolution=720p&renderScale=0.5&drs=1&maxFps=60
   const params = new URLSearchParams(location.search);
+  const quality = params.get("quality");
+  if (quality === "bajo" || quality === "medio" || quality === "alto" || quality === "ultra") {
+    applyQualityPreset(config, quality);
+  }
+  const resolution = params.get("resolution") as ResolutionPreset | null;
+  if (resolution && resolution in RESOLUTION_HEIGHT_MAP) {
+    config.render.resolutionPreset = resolution;
+    config.render.maxResolutionHeight = RESOLUTION_HEIGHT_MAP[resolution];
+  }
   const num = (k: string) => (params.has(k) ? Number(params.get(k)) : undefined);
   const renderScale = num("renderScale");
   if (renderScale && renderScale > 0) config.render.renderScale = renderScale;
+  const maxFps = num("maxFps");
+  if (maxFps !== undefined && maxFps >= 0) config.render.maxFps = maxFps;
+  if (params.get("drs") === "1") config.render.dynamicResolution = true;
+  if (params.get("drs") === "0") config.render.dynamicResolution = false;
   const envScale = num("envScale");
   if (envScale && envScale > 0) config.environment.scale = envScale;
   if (params.get("lod") === "0") config.environment.lod = false;

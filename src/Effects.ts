@@ -148,6 +148,7 @@ class ParticleSystem {
   private readonly decalTex: Float32Array;
   private next = 0;
   private alive = 0;
+  private activeBound = 0;
 
   constructor(
     private readonly capacity: number,
@@ -160,7 +161,7 @@ class ParticleSystem {
     this.geometry.index = quad.index;
     this.geometry.setAttribute("position", quad.attributes.position);
     this.geometry.setAttribute("uv", quad.attributes.uv);
-    this.geometry.instanceCount = capacity;
+    this.geometry.instanceCount = 0;
     const attr = (n: number) => new THREE.InstancedBufferAttribute(new Float32Array(capacity * n), n).setUsage(THREE.DynamicDrawUsage);
     this.aPos = attr(3);
     this.aVel = attr(3);
@@ -202,6 +203,7 @@ class ParticleSystem {
     });
     this.mesh = new THREE.Mesh(this.geometry, this.material);
     this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
     this.mesh.renderOrder = additive ? 13 : 11;
     quad.dispose();
   }
@@ -209,6 +211,7 @@ class ParticleSystem {
   spawn(p: ParticleSpec): void {
     const i = this.next;
     this.next = (i + 1) % this.capacity;
+    const wasAlive = this.life[i] > 0;
     const o3 = i * 3;
     const o4 = i * 4;
     this.pos[o3] = p.x;
@@ -246,7 +249,10 @@ class ParticleSystem {
       this.decalTex[i] = p.decal.tex ?? -1;
     }
     this.flags[i] = flags;
-    this.alive++;
+    if (!wasAlive) this.alive++;
+    if (i + 1 > this.activeBound) this.activeBound = i + 1;
+    this.geometry.instanceCount = this.activeBound;
+    this.mesh.visible = true;
   }
 
   private kill(i: number): void {
@@ -257,11 +263,20 @@ class ParticleSystem {
   }
 
   update(dt: number): void {
-    if (this.alive === 0) return;
-    for (let i = 0; i < this.capacity; i++) {
+    if (this.alive === 0) {
+      this.mesh.visible = false;
+      this.geometry.instanceCount = 0;
+      return;
+    }
+    const limit = this.activeBound;
+    let maxActive = 0;
+    let aliveCount = 0;
+    for (let i = 0; i < limit; i++) {
       if (this.life[i] <= 0) continue;
       if (this.flags[i] & FLAG_FRESH) {
         this.flags[i] &= ~FLAG_FRESH;
+        maxActive = i + 1;
+        aliveCount++;
         continue;
       }
       const life = (this.life[i] -= dt);
@@ -309,7 +324,13 @@ class ParticleSystem {
       const fi = this.fadeIn[i];
       const appear = fi > 0 ? Math.min(1, t / fi) : 1;
       this.color[o4 + 3] = this.alpha0[i] * appear * (1 - Math.pow(t, this.fade[i]));
+      maxActive = i + 1;
+      aliveCount++;
     }
+    this.alive = aliveCount;
+    this.activeBound = maxActive;
+    this.geometry.instanceCount = maxActive;
+    this.mesh.visible = aliveCount > 0;
     this.aPos.needsUpdate = true;
     this.aVel.needsUpdate = true;
     this.aColor.needsUpdate = true;
@@ -370,6 +391,8 @@ class DecalSystem {
   private readonly growTime: Float32Array;
   private readonly opacity: Float32Array;
   private next = 0;
+  private alive = 0;
+  private activeBound = 0;
   lifetime = 45;
 
   constructor(
@@ -381,7 +404,7 @@ class DecalSystem {
     this.geometry.index = quad.index;
     this.geometry.setAttribute("position", quad.attributes.position);
     this.geometry.setAttribute("uv", quad.attributes.uv);
-    this.geometry.instanceCount = capacity;
+    this.geometry.instanceCount = 0;
     const attr = (n: number) => new THREE.InstancedBufferAttribute(new Float32Array(capacity * n), n).setUsage(THREE.DynamicDrawUsage);
     this.aPos = attr(3);
     this.aData = attr(4);
@@ -408,6 +431,7 @@ class DecalSystem {
     });
     this.mesh = new THREE.Mesh(this.geometry, this.material);
     this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
     // Después de los splats (como las sombras de contacto) para que el suelo no las tape.
     this.mesh.renderOrder = 9;
     quad.dispose();
@@ -424,6 +448,7 @@ class DecalSystem {
   ): void {
     const i = this.next;
     this.next = (i + 1) % this.capacity;
+    const wasAlive = this.age[i] !== Infinity;
     const p = this.aPos.array as Float32Array;
     // Un poco por encima del suelo; los charcos más grandes, más arriba (z-fighting).
     p[i * 3] = x;
@@ -442,14 +467,32 @@ class DecalSystem {
     this.targetSize[i] = size;
     this.growTime[i] = opts.grow ?? 0;
     this.opacity[i] = opts.opacity ?? 1;
+    if (!wasAlive) this.alive++;
+    if (i + 1 > this.activeBound) this.activeBound = i + 1;
+    this.geometry.instanceCount = this.activeBound;
+    this.mesh.visible = true;
+    this.aPos.needsUpdate = true;
+    this.aTint.needsUpdate = true;
+    this.aData.needsUpdate = true;
   }
 
   update(dt: number): void {
+    if (this.alive === 0) {
+      this.mesh.visible = false;
+      this.geometry.instanceCount = 0;
+      return;
+    }
     const d = this.aData.array as Float32Array;
-    for (let i = 0; i < this.capacity; i++) {
+    const limit = this.activeBound;
+    let maxActive = 0;
+    let aliveCount = 0;
+    let dataChanged = false;
+    for (let i = 0; i < limit; i++) {
       if (this.age[i] === Infinity) continue;
       if (this.delay[i] > 0) {
         this.delay[i] -= dt;
+        maxActive = i + 1;
+        aliveCount++;
         continue;
       }
       const age = (this.age[i] += dt);
@@ -457,21 +500,31 @@ class DecalSystem {
         this.age[i] = Infinity;
         d[i * 4 + 2] = 0;
         d[i * 4 + 1] = 0;
+        dataChanged = true;
         continue;
       }
+      maxActive = i + 1;
+      aliveCount++;
       const grow = this.growTime[i];
-      if (grow > 0) {
+      if (grow > 0 && age <= grow + dt) {
         // Charco: se expande rápido al principio y frena (la hemolinfa es espesa).
         const k = Math.min(1, age / grow);
         d[i * 4 + 1] = this.targetSize[i] * (0.1 + 0.9 * (1 - Math.pow(1 - k, 3)));
+        dataChanged = true;
       }
       // Aparece en 0,1 s; los últimos 4 s se desvanece.
       const fadeOut = Math.min(1, (this.lifetime - age) / 4);
-      d[i * 4 + 2] = this.opacity[i] * Math.min(1, age * 10) * fadeOut;
+      const nextAlpha = this.opacity[i] * Math.min(1, age * 10) * fadeOut;
+      if (Math.abs(d[i * 4 + 2] - nextAlpha) > 1e-4) {
+        d[i * 4 + 2] = nextAlpha;
+        dataChanged = true;
+      }
     }
-    this.aData.needsUpdate = true;
-    this.aPos.needsUpdate = true;
-    this.aTint.needsUpdate = true;
+    this.alive = aliveCount;
+    this.activeBound = maxActive;
+    this.geometry.instanceCount = maxActive;
+    this.mesh.visible = aliveCount > 0;
+    if (dataChanged) this.aData.needsUpdate = true;
   }
 
   dispose(): void {
@@ -591,6 +644,13 @@ export class Effects {
     this.decals.lifetime = seconds;
   }
 
+  /** Multiplicador de cantidad de partículas por ráfaga (0.15 a 1). */
+  particleDensity = 1;
+
+  private count(base: number): number {
+    return Math.max(1, Math.round(base * THREE.MathUtils.clamp(this.particleDensity, 0.15, 1)));
+  }
+
   private shade(base: THREE.Color, min: number, max: number): THREE.Color {
     return this.tmpColor.copy(base).multiplyScalar(rand(min, max));
   }
@@ -618,7 +678,8 @@ export class Effects {
     this.flashLight.position.copy(muzzle).addScaledVector(dir, 0.3);
 
     // Chispas de pólvora: rayas rápidas en un cono hacia adelante.
-    for (let n = 0; n < 7; n++) {
+    const sparks = this.count(7);
+    for (let n = 0; n < sparks; n++) {
       const speed = rand(10, 26);
       this.v.copy(dir).multiplyScalar(speed);
       this.v.x += rand(-1, 1) * speed * 0.22;
@@ -643,7 +704,8 @@ export class Effects {
     }
 
     // Humo: gases que salen del cañón, se expanden, suben y se los lleva el aire.
-    for (let n = 0; n < 3; n++) {
+    const smokes = this.count(3);
+    for (let n = 0; n < smokes; n++) {
       const speed = rand(0.6, 2.2) * (n + 1) * 0.6;
       this.particles.spawn({
         x: muzzle.x + dir.x * 0.15 * n,
@@ -723,7 +785,8 @@ export class Effects {
   bloodHit(point: THREE.Vector3, normal: THREE.Vector3, bulletDir: THREE.Vector3, groundY: number, scale = 1, intensity = 1): void {
     // Presión ~ √escala; volumen de la herida ~ escala.
     const s = Math.sqrt(scale);
-    const drops = Math.round(40 * intensity);
+    const effIntensity = intensity * THREE.MathUtils.clamp(this.particleDensity, 0.15, 1);
+    const drops = Math.max(2, Math.round(40 * effIntensity));
     for (let n = 0; n < drops; n++) {
       // Cono alrededor de la normal, empujado por la bala (salpica hacia atrás y a los costados).
       this.v.set(rand(-1, 1), rand(-0.6, 1), rand(-1, 1)).multiplyScalar(0.55);
@@ -752,7 +815,7 @@ export class Effects {
     }
     // Chorro: un hilo denso que sale de la herida en línea (la hemolinfa a presión).
     this.v.copy(normal).addScaledVector(bulletDir, -0.3).normalize();
-    for (let n = 0; n < Math.round(10 * intensity); n++) {
+    for (let n = 0; n < Math.max(1, Math.round(10 * effIntensity)); n++) {
       const speed = (2.5 + n * 0.35) * s;
       this.particles.spawn({
         x: point.x,
@@ -775,7 +838,7 @@ export class Effects {
       });
     }
     // Niebla de hemolinfa pulverizada: se abre en una nube y cae despacio.
-    for (let n = 0; n < Math.round(6 * intensity); n++) {
+    for (let n = 0; n < Math.max(1, Math.round(6 * effIntensity)); n++) {
       this.v.copy(normal).multiplyScalar(rand(0.6, 1.8) * s);
       this.particles.spawn({
         x: point.x,
@@ -797,7 +860,7 @@ export class Effects {
       });
     }
     // Esquirlas de caparazón.
-    for (let n = 0; n < Math.round(3 * intensity); n++) {
+    for (let n = 0; n < Math.max(1, Math.round(3 * effIntensity)); n++) {
       this.v.copy(normal).multiplyScalar(rand(2, 5)).add(this.side.set(rand(-2, 2), rand(0.5, 3), rand(-2, 2)));
       this.particles.spawn({
         x: point.x,
@@ -827,7 +890,8 @@ export class Effects {
    */
   deathGush(center: THREE.Vector3, groundY: number, scale = 1): void {
     const s = Math.sqrt(scale);
-    for (let n = 0; n < 90; n++) {
+    const gushDrops = this.count(90);
+    for (let n = 0; n < gushDrops; n++) {
       const a = Math.random() * Math.PI * 2;
       const out = rand(0.5, 3.2) * s;
       const size = dropSize(0.01, 0.08) * scale;
@@ -851,7 +915,8 @@ export class Effects {
         decal: Math.random() < 0.6 ? { size: size * rand(4, 7), color: this.shade(this.bloodDecal, 0.75, 1.05) } : undefined,
       });
     }
-    for (let n = 0; n < 10; n++) {
+    const mistCount = this.count(10);
+    for (let n = 0; n < mistCount; n++) {
       this.particles.spawn({
         x: center.x,
         y: center.y,
@@ -871,7 +936,8 @@ export class Effects {
         spin: rand(-0.6, 0.6),
       });
     }
-    for (let n = 0; n < 14; n++) {
+    const chunkCount = this.count(14);
+    for (let n = 0; n < chunkCount; n++) {
       this.particles.spawn({
         x: center.x,
         y: center.y,
@@ -928,7 +994,8 @@ export class Effects {
    * agujero; en paredes: polvo de revoque y chispas.
    */
   impact(point: THREE.Vector3, normal: THREE.Vector3, groundY: number, onGround: boolean): void {
-    for (let n = 0; n < 4; n++) {
+    const puffs = this.count(4);
+    for (let n = 0; n < puffs; n++) {
       this.v.copy(normal).multiplyScalar(rand(0.4, 1.4));
       this.particles.spawn({
         x: point.x,
@@ -949,7 +1016,8 @@ export class Effects {
         spin: rand(-1, 1),
       });
     }
-    for (let n = 0; n < 9; n++) {
+    const debris = this.count(9);
+    for (let n = 0; n < debris; n++) {
       this.v.copy(normal).multiplyScalar(rand(1.5, 4)).add(this.side.set(rand(-1.5, 1.5), rand(0, 2), rand(-1.5, 1.5)));
       this.particles.spawn({
         x: point.x,
@@ -998,7 +1066,8 @@ export class Effects {
 
   /** Pisada de un cascarudo: nube de nieve que se levanta y terrones. */
   footstep(point: THREE.Vector3, scale = 1): void {
-    for (let n = 0; n < 3; n++) {
+    const puffs = this.count(3);
+    for (let n = 0; n < puffs; n++) {
       const a = Math.random() * Math.PI * 2;
       const out = rand(0.3, 0.8) * scale * 0.5;
       this.particles.spawn({
@@ -1020,7 +1089,8 @@ export class Effects {
         spin: rand(-0.6, 0.6),
       });
     }
-    for (let n = 0; n < 7; n++) {
+    const clumps = this.count(7);
+    for (let n = 0; n < clumps; n++) {
       this.particles.spawn({
         x: point.x,
         y: point.y + 0.05,

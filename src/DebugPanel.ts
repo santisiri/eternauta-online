@@ -8,8 +8,8 @@
 
 import GUI from "lil-gui";
 import type { Controller } from "lil-gui";
-import { clearSavedConfig, defaultConfig, saveConfig } from "./config";
-import type { GameConfig } from "./config";
+import { applyQualityPreset, clearSavedConfig, defaultConfig, saveConfig } from "./config";
+import type { GameConfig, QualityPreset } from "./config";
 
 export interface DebugHooks {
   onCharacterChange(): void;
@@ -130,6 +130,10 @@ export class DebugPanel {
     er.add(c.environment.rotationDeg, "z", -180, 180, 0.5).onChange(h.onEnvironmentChange);
     env.add(c.environment, "scale", 0.1, 5, 0.01).name("escala").onChange(h.onEnvironmentChange);
     env.add(c.environment, "lodSplatScale", 0.25, 3, 0.05).name("presupuesto LoD ×").onChange(h.onRenderChange);
+    env.add(c.environment, "lodRenderScale", 1, 4, 0.1).name("umbral LoD (px)").onChange(h.onRenderChange);
+    env.add(c.environment, "maxStdDev", 1.5, 3, 0.05).name("radio gauss (σ)").onChange(h.onRenderChange);
+    env.add(c.environment, "minAlpha", 0.001, 0.05, 0.001).name("alfa mín.").onChange(h.onRenderChange);
+    env.add(c.environment, "minSortIntervalMs", 0, 60, 2).name("intervalo sort (ms)").onChange(h.onRenderChange);
     env.add(this.view, "splatVisible").name("mostrar splat").onChange((v: boolean) => h.setSplatVisible(v));
     env.add(c.environment, "lod").name("LoD (recargar)");
     env.add(c.environment, "extSplats").name("float32 (recargar)");
@@ -194,12 +198,28 @@ export class DebugPanel {
 
     // --- Render -------------------------------------------------------------
     const r = gui.addFolder("Render").close();
+    r.add(c.render, "qualityPreset", ["bajo", "medio", "alto", "ultra", "personalizado"])
+      .name("perfil calidad")
+      .onChange((v: QualityPreset) => {
+        if (v !== "personalizado") applyQualityPreset(c, v);
+        this.refreshDisplay();
+        h.onRenderChange();
+        h.onPropsChange();
+      });
+    r.add(c.render, "resolutionPreset", ["nativa", "1080p", "900p", "720p", "540p", "480p"])
+      .name("resolución máx.")
+      .onChange(h.onRenderChange);
     r.add(c.render, "maxPixelRatio", 0.5, 3, 0.25).name("pixel ratio máx.").onChange(h.onRenderChange);
     r.add(c.render, "renderScale", 0.25, 1, 0.05).name("escala resolución").onChange(h.onRenderChange);
+    r.add(c.render, "dynamicResolution").name("resolución dinámica").onChange(h.onRenderChange);
+    r.add(c.render, "targetFps", [30, 60, 90, 120]).name("FPS objetivo DRS");
+    r.add(c.render, "maxFps", [0, 30, 60, 90, 120]).name("límite FPS (0=sin)");
     r.add(c.render, "pixelated").name("pixelado PS2").onChange(h.onRenderChange);
     r.addColor(c.render, "background").name("fondo").onChange(h.onRenderChange);
     r.add(c.render, "filmGrain").name("grano").onChange(h.onRenderChange);
     r.add(c.render, "vignette").name("viñeta").onChange(h.onRenderChange);
+    r.add(c.render, "colorGrading").name("gradación color").onChange(h.onRenderChange);
+    r.add(c.effects, "particleDensity", 0.2, 1, 0.05).name("densidad partículas").onChange(h.onRenderChange);
 
     // --- Atmósfera ----------------------------------------------------------
     const a = gui.addFolder("Nevada").close();
@@ -244,6 +264,13 @@ export class DebugPanel {
   updateStats(): void {
     if (!this.visible) return;
     for (const c of this.statControllers) c.updateDisplay();
+  }
+
+  /** Sincroniza todos los controles de lil-gui con los valores actuales de `config`. */
+  refreshDisplay(): void {
+    for (const c of this.gui.controllersRecursive()) {
+      if (!this.statControllers.includes(c)) c.updateDisplay();
+    }
   }
 
   private exportJson(): void {

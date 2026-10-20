@@ -140,6 +140,10 @@ export class EnemySystem {
   private readonly tmp2 = new THREE.Vector3();
   private readonly ray = new THREE.Ray();
   private readonly feet = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  private readonly frustum = new THREE.Frustum();
+  private readonly projScreenMatrix = new THREE.Matrix4();
+  private readonly cullSphere = new THREE.Sphere();
+  private renderFrame = 0;
   private readonly disposables: { dispose(): void }[] = [];
 
   constructor(
@@ -208,7 +212,12 @@ export class EnemySystem {
   }
 
   get aliveCount(): number {
-    return this.enemies.filter((e) => e.active && e.state !== "dead").length;
+    let n = 0;
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      if (e.active && e.state !== "dead") n++;
+    }
+    return n;
   }
 
   private createEnemy(): Enemy {
@@ -338,7 +347,7 @@ export class EnemySystem {
   // ---------------------------------------------------------------------------
 
   /** Avanza la IA a paso fijo y actualiza las poses (llamar una vez por frame). */
-  update(frameDt: number, player: THREE.Vector3, playerAlive: boolean): void {
+  update(frameDt: number, player: THREE.Vector3, playerAlive: boolean, camera?: THREE.Camera): void {
     if (!this.ready) return;
     this.player.copy(player);
     this.playerAlive = playerAlive;
@@ -351,7 +360,7 @@ export class EnemySystem {
       ticks++;
     }
     if (ticks === 4) this.accumulator = 0;
-    this.render(frameDt, this.accumulator / step);
+    this.render(frameDt, this.accumulator / step, camera);
   }
 
   private fixedUpdate(dt: number): void {
@@ -593,11 +602,14 @@ export class EnemySystem {
   private separate(): void {
     const s = this.config.enemies.scale;
     const min = VISUAL_RADIUS * 2 * s;
-    const list = this.enemies.filter((e) => e.active && e.state !== "dead");
-    for (let i = 0; i < list.length; i++) {
-      const a = list[i];
-      for (let j = i + 1; j < list.length; j++) {
-        const b = list[j];
+    const keep = (VISUAL_RADIUS + 0.5) * s;
+    const n = this.enemies.length;
+    for (let i = 0; i < n; i++) {
+      const a = this.enemies[i];
+      if (!a.active || a.state === "dead") continue;
+      for (let j = i + 1; j < n; j++) {
+        const b = this.enemies[j];
+        if (!b.active || b.state === "dead") continue;
         const dx = b.position.x - a.position.x;
         const dz = b.position.z - a.position.z;
         const d = Math.hypot(dx, dz);
@@ -609,7 +621,6 @@ export class EnemySystem {
         b.position.z += (dz / d) * push;
       }
       // Nunca encima del jugador.
-      const keep = (VISUAL_RADIUS + 0.5) * s;
       const px = a.position.x - this.player.x;
       const pz = a.position.z - this.player.z;
       const pd = Math.hypot(px, pz);
@@ -691,8 +702,16 @@ export class EnemySystem {
   // Render
   // ---------------------------------------------------------------------------
 
-  private render(dt: number, alpha: number): void {
+  private render(dt: number, alpha: number, camera?: THREE.Camera): void {
+    this.renderFrame++;
     const s = this.config.enemies.scale;
+    const castShadows = this.config.character.castShadowBlob;
+    if (camera) {
+      this.projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      this.frustum.setFromProjectionMatrix(this.projScreenMatrix);
+    }
+    const sphereRadius = 2.6 * s;
+
     for (const e of this.enemies) {
       if (!e.active) continue;
       const root = e.root;
@@ -722,12 +741,35 @@ export class EnemySystem {
       root.rotation.set(0, yaw, roll);
 
       e.pose.time += dt;
-      e.rig.apply(e.pose);
+
+      // Frustum culling manual con esfera envolvente holgada (mesh.frustumCulled
+      // está desactivado porque las patas se salen del bounding box de reposo).
+      let inFrustum = true;
+      if (camera) {
+        this.cullSphere.center.set(root.position.x, root.position.y + 0.9 * s, root.position.z);
+        this.cullSphere.radius = sphereRadius;
+        inFrustum = this.frustum.intersectsSphere(this.cullSphere);
+      }
+      root.visible = inFrustum;
 
       // Pisadas: cada trípode que apoya levanta nieve (sólo cerca del jugador).
       const landed = CascarudoRig.landings(e.renderGait, e.pose.gait);
       e.renderGait = e.pose.gait;
+
+      if (inFrustum) {
+        // A distancia (> 26 m), actualizar los 57 huesos en frames alternados.
+        const shouldApplyRig =
+          e.distance <= 26 ||
+          e.state === "dead" ||
+          Boolean(landed && e.distance < FOOTSTEP_RANGE) ||
+          ((this.renderFrame + e.id) & 1) === 0;
+        if (shouldApplyRig) {
+          e.rig.apply(e.pose);
+        }
+      }
+
       if (landed && e.state !== "dead" && e.distance < FOOTSTEP_RANGE && this.onFootstep) {
+        if (!inFrustum) e.rig.apply(e.pose);
         for (let tripod = 0; tripod < 2; tripod++) {
           if (!(landed & (1 << tripod))) continue;
           e.rig.tripodTips(tripod, this.feet);
@@ -738,11 +780,10 @@ export class EnemySystem {
         }
       }
 
-
       const shadow = root.userData.shadow as THREE.Mesh;
       shadow.position.set(root.position.x, e.position.y + 0.03, root.position.z);
       shadow.scale.setScalar(2.4 * s * (e.state === "dead" ? 0.75 : 1));
-      shadow.visible = root.visible && e.stateTime < this.config.enemies.corpseTime + SINK_TIME * 0.5;
+      shadow.visible = inFrustum && castShadows && e.stateTime < this.config.enemies.corpseTime + SINK_TIME * 0.5;
     }
   }
 

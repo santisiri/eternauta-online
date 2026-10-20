@@ -8,6 +8,7 @@ import type { GameConfig } from "./config";
 export interface HudMetrics {
   fps: number;
   frameMs: number;
+  resolution: string;
   position: { x: number; y: number; z: number };
   animation: string;
   splat: string;
@@ -26,9 +27,11 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
 
 export class Hud {
   readonly root: HTMLElement;
-  private readonly metrics: Record<"fps" | "pos" | "anim" | "splat" | "coll", HTMLElement>;
+  private readonly metrics: Record<"fps" | "res" | "pos" | "anim" | "splat" | "coll", HTMLElement>;
   private readonly start: HTMLElement;
   private readonly enterButton: HTMLButtonElement;
+  private readonly gfxStartButton: HTMLButtonElement;
+  private readonly gfxHudButton: HTMLButtonElement;
   private readonly errors: HTMLElement;
   private readonly note: HTMLElement;
   private readonly help: HTMLElement;
@@ -39,6 +42,7 @@ export class Hud {
   private readonly grain: HTMLElement;
   private readonly vignette: HTMLElement;
   onEnter?: () => void;
+  onOpenGraphics?: () => void;
 
   constructor(container: HTMLElement) {
     this.root = el("div", "hud");
@@ -58,18 +62,27 @@ export class Hud {
     };
     this.metrics = {
       fps: row("FPS"),
+      res: row("RES"),
       pos: row("XYZ"),
       anim: row("ANIM"),
       splat: row("SPZ"),
       coll: row("COL"),
     };
 
+    this.gfxHudButton = el("button", "hud-gfx-btn", "⚙ GRÁFICOS · G");
+    this.gfxHudButton.type = "button";
+    this.gfxHudButton.title = "Configuración gráfica y resolución (G)";
+    this.gfxHudButton.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.onOpenGraphics?.();
+    });
+
     const help = el("div", "hud-help");
     this.help = help;
     help.innerHTML =
       "<b>WASD</b> mover · <b>Shift</b> correr · <b>Espacio</b> saltar · <b>Clic izq./Q</b> disparar · <b>Clic der.</b> apuntar · " +
       "<b>F</b> piña · <b>V</b> patada · <b>C</b> esquivar · <b>K</b> morir · <b>R</b> reiniciar · <b>M</b> sonido · " +
-      "<b>Rueda</b> distancia · <b>Esc</b> liberar mouse · <b>P</b> panel debug";
+      "<b>G</b> gráficos · <b>P</b> debug";
 
     this.hint = el("div", "hud-hint");
 
@@ -101,13 +114,18 @@ export class Hud {
     this.enterButton = el("button", "start-enter", "CARGANDO…");
     this.enterButton.disabled = true;
     this.enterButton.addEventListener("click", () => this.onEnter?.());
+    this.gfxStartButton = el("button", "start-gfx", "⚙ GRÁFICOS Y RESOLUCIÓN");
+    this.gfxStartButton.type = "button";
+    this.gfxStartButton.addEventListener("click", () => this.onOpenGraphics?.());
+    const actions = el("div", "start-actions");
+    actions.append(this.enterButton, this.gfxStartButton);
     const keys = el("p", "start-keys");
     this.keys = keys;
     keys.innerHTML = help.innerHTML;
-    card.append(kicker, h, sub, quote, this.note, loading, this.errors, this.enterButton, keys);
+    card.append(kicker, h, sub, quote, this.note, loading, this.errors, actions, keys);
     this.start.append(card);
 
-    this.root.append(title, panel, help, this.hint);
+    this.root.append(title, panel, this.gfxHudButton, help, this.hint);
     container.append(this.vignette, this.grain, this.root, this.start);
   }
 
@@ -173,6 +191,7 @@ export class Hud {
 
   update(m: HudMetrics): void {
     this.metrics.fps.textContent = `${m.fps.toFixed(0)}  (${m.frameMs.toFixed(1)} ms)`;
+    this.metrics.res.textContent = m.resolution;
     this.metrics.pos.textContent = `${m.position.x.toFixed(2)}  ${m.position.y.toFixed(2)}  ${m.position.z.toFixed(2)}`;
     this.metrics.anim.textContent = m.animation;
     this.metrics.splat.textContent = m.splat;

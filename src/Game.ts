@@ -13,6 +13,7 @@ import type { GameConfig, OneShotAction } from "./config";
 import { DebugPanel } from "./DebugPanel";
 import { Effects } from "./Effects";
 import { EnemySystem } from "./EnemySystem";
+import { GraphicsMenu } from "./GraphicsMenu";
 import { Hud } from "./Hud";
 import { InputManager } from "./InputManager";
 import { PlayerController } from "./PlayerController";
@@ -35,6 +36,7 @@ export class Game {
   readonly props: PropSystem;
   readonly camera: ThirdPersonCamera;
   readonly hud: Hud;
+  readonly graphics: GraphicsMenu;
   readonly debug: DebugPanel;
   readonly enemies: EnemySystem;
   readonly effects: Effects;
@@ -54,6 +56,7 @@ export class Game {
   private playing = false;
   private characterReady = false;
   private lastTime = 0;
+  private lastRenderTime = 0;
   private accumulator = 0;
   private elapsed = 0;
   private pendingJump = false;
@@ -95,6 +98,7 @@ export class Game {
     this.enemies.envMap = this.world.scene.environment;
     this.effects = new Effects(config.effects.bloodColor);
     this.effects.decalLifetime = config.effects.decalLifetime;
+    this.effects.particleDensity = config.effects.particleDensity;
     this.combatHud = new CombatHud(container);
     this.combat = new Combat(config, this.world.camera, this.collision, this.enemies, this.effects, this.combatHud);
     this.world.scene.add(this.enemies.group, this.effects.group);
@@ -149,8 +153,7 @@ export class Game {
         this.collision.updateEnvironmentTransform(this.environment.matrix);
       },
       onRenderChange: () => {
-        this.world.applyRenderSettings();
-        this.hud.applyEffects(config);
+        this.applyGraphicsSettings();
       },
       onSpawnHere: () => {
         const p = this.player.position;
@@ -169,11 +172,31 @@ export class Game {
       },
       setCollisionDebug: (v) => (this.collisionView.group.visible = v),
       setSplatVisible: (v) => this.environment.setVisible(v),
-      onPropsChange: () => this.props.applySettings(),
+      onPropsChange: () => {
+        this.props.applySettings();
+        this.environment.syncEditable();
+        this.world.spark.setDirty();
+      },
       characterInfo: () => this.characterInfo(),
     });
 
+    this.graphics = new GraphicsMenu(container, config, {
+      onApply: () => this.applyGraphicsSettings(),
+      onOpenChange: (open) => {
+        if (open) {
+          this.input.exitPointerLock();
+          this.input.enabled = false;
+          this.updateUi();
+        } else if (this.playing) {
+          this.input.enabled = true;
+          if (!this.touchMode) this.input.requestPointerLock();
+        }
+      },
+    });
+
     this.hud.onEnter = () => this.enter();
+    this.hud.onOpenGraphics = () => this.graphics.toggle();
+    window.addEventListener("keydown", this.handleEscapeKey);
 
     this.touch = new TouchControls(container, this.input, config);
     if (this.touchMode) this.hud.setTouchHelp();
@@ -303,6 +326,25 @@ export class Game {
       .catch(() => undefined);
   }
 
+  private readonly handleEscapeKey = (e: KeyboardEvent) => {
+    if (e.code === "Escape" && this.graphics.isOpen) {
+      e.preventDefault();
+      this.graphics.close();
+    }
+  };
+
+  /** Aplica en caliente todos los ajustes de render, resolución, splats y efectos. */
+  applyGraphicsSettings(): void {
+    this.world.applyRenderSettings();
+    this.hud.applyEffects(this.config);
+    this.props.applySettings();
+    this.environment.syncEditable();
+    this.effects.particleDensity = this.config.effects.particleDensity;
+    this.effects.decalLifetime = this.config.effects.decalLifetime;
+    this.debug.refreshDisplay();
+    this.graphics.syncUI();
+  }
+
   private readonly handleFirstTouch = (e: PointerEvent) => {
     if (e.pointerType !== "touch" || this.touchMode) return;
     this.touchMode = true;
@@ -312,6 +354,13 @@ export class Game {
   };
 
   private frame(now: number): void {
+    const maxFps = this.config.render.maxFps;
+    if (maxFps > 0 && this.lastRenderTime > 0) {
+      const minInterval = 1000 / maxFps;
+      if (now - this.lastRenderTime < minInterval - 0.5) return;
+    }
+    this.lastRenderTime = now;
+
     const frameDt = Math.min((now - this.lastTime) / 1000, 0.25);
     this.lastTime = now;
     this.elapsed += frameDt;
@@ -319,7 +368,8 @@ export class Game {
 
     // --- Entrada -----------------------------------------------------------------
     if (this.input.consume("toggleDebug")) this.debug.toggle();
-    if (this.playing) {
+    if (this.input.consume("toggleGraphics")) this.graphics.toggle();
+    if (this.playing && !this.graphics.isOpen) {
       const { dx, dy } = this.input.consumeMouseDelta();
       this.camera.handleInput(dx, dy, this.input.consumeWheel());
       if (this.input.consume("reset")) this.player.reset();
@@ -372,8 +422,10 @@ export class Game {
       this.creatureChatter(frameDt);
     }
     if (this.playing) {
-      this.enemies.update(frameDt, pos, !this.player.dead);
-      if (this.characterReady) this.character.muzzleWorldPosition(this.muzzle);
+      this.enemies.update(frameDt, pos, !this.player.dead, this.world.camera);
+      if (this.characterReady && this.player.shooting) {
+        this.character.muzzleWorldPosition(this.muzzle);
+      }
       this.combat.update(frameDt, {
         shooting: this.player.shooting,
         dead: this.player.dead,
@@ -429,22 +481,38 @@ export class Game {
       this.frameMs = (this.fpsTime / this.frameCount) * 1000;
       this.frameCount = 0;
       this.fpsTime = 0;
+      this.world.updateDynamicResolution(this.fps);
     }
   }
 
   private updateUi(): void {
     const env = this.environment;
+    const canvas = this.world.renderer.domElement;
+    const drsTag =
+      this.config.render.dynamicResolution && this.world.currentDynamicScale < 0.99
+        ? ` · DRS ${Math.round(this.world.currentDynamicScale * 100)}%`
+        : "";
+    const resStr = `${canvas.width}×${canvas.height} (${this.config.render.qualityPreset.toUpperCase()}${drsTag})`;
     this.hud.update({
       fps: this.fps,
       frameMs: this.frameMs,
+      resolution: resStr,
       position: this.player.position,
       animation: this.characterReady ? this.character.animationLabel : "—",
       splat: env.statusLabel,
       splatError: env.status === "error",
       collision: this.collision.status,
     });
+    this.graphics.updateLiveMetrics({
+      fps: this.fps,
+      frameMs: this.frameMs,
+      width: canvas.width,
+      height: canvas.height,
+      pixelRatio: this.world.pixelRatio,
+      dynamicScale: this.world.currentDynamicScale,
+      activeSplats: this.world.spark.activeSplats,
+    });
     const info = this.world.renderer.info;
-    const canvas = this.world.renderer.domElement;
     const mem = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
     Object.assign(this.debug.stats, {
       fps: +this.fps.toFixed(1),
@@ -488,7 +556,9 @@ export class Game {
     this.running = false;
     this.input.exitPointerLock();
     this.input.dispose();
+    this.graphics.dispose();
     this.debug.dispose();
+    window.removeEventListener("keydown", this.handleEscapeKey);
     window.removeEventListener("pointerdown", this.handleFirstTouch);
     this.touch.dispose();
     this.enemies.dispose();

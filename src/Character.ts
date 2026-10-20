@@ -62,6 +62,7 @@ export interface CharacterReport {
 type ActionSlot = {
   action: THREE.AnimationAction;
   weight: number;
+  target: number;
   /** Etiqueta mostrada en el HUD. */
   label: string;
 };
@@ -103,6 +104,8 @@ export class Character {
   private walkClipSpeed = 1.4;
   private runClipSpeed = 4;
   private shootClipSpeed = 2.3;
+  private rightHand: THREE.Object3D | null = null;
+  private activeSlots: ActionSlot[] = [];
   private readonly disposables: { dispose(): void }[] = [];
 
   constructor(private readonly config: GameConfig) {
@@ -265,6 +268,7 @@ export class Character {
     this.applyCalibration();
 
     // ---- Acciones ----------------------------------------------------------------
+    this.rightHand = model.getObjectByName("mixamorigRightHand") ?? null;
     this.setupActions(neutralTime);
 
     const missing = (["idle", "walk", "run", "jump", "shoot", ...ONE_SHOTS] as AnimationStateName[]).filter((s) => !this.clips.has(s));
@@ -333,7 +337,7 @@ export class Character {
       action.enabled = true;
       action.setEffectiveWeight(weight);
       action.play();
-      return { action, weight, label };
+      return { action, weight, target: weight, label };
     };
     const walkClip = this.clips.get("walk");
     if (walkClip) this.walk = make(walkClip, "walk");
@@ -376,19 +380,15 @@ export class Character {
       const clip = this.clips.get(action);
       if (clip) this.oneShots.set(action, scrubbed(clip, action));
     }
-  }
-
-  private get slots(): ActionSlot[] {
-    return [this.idle, this.walk, this.run, this.jump, this.fall, this.shoot, this.aim, ...this.oneShots.values()].filter(Boolean) as ActionSlot[];
+    this.activeSlots = [this.idle, this.walk, this.run, this.jump, this.fall, this.shoot, this.aim, ...this.oneShots.values()].filter(Boolean) as ActionSlot[];
   }
 
   /** Avanza la animación según el estado del controlador. */
   update(dt: number, driver: AnimationDriver): void {
     if (!this.mixer) return;
     const { state, horizontalSpeed: speed } = driver;
-    const slots = this.slots;
-    const targets = new Map<ActionSlot, number>();
-    for (const s of slots) targets.set(s, 0);
+    const slots = this.activeSlots;
+    for (let i = 0; i < slots.length; i++) slots[i].target = 0;
 
     const clipSpeed = this.effectiveWalkClipSpeed;
     let label = "";
@@ -399,14 +399,14 @@ export class Character {
       // La acción avanza a paso fijo en el controlador: se muestra ese instante.
       const duration = oneShot.action.getClip().duration;
       oneShot.action.time = THREE.MathUtils.clamp(driver.actionClipTime, 0, duration - 1e-4);
-      targets.set(oneShot, 1);
+      oneShot.target = 1;
       label = `${state} ${driver.actionClipTime.toFixed(2)} s`;
     } else if (isOneShot(state)) {
-      if (this.idle) targets.set(this.idle, 1);
+      if (this.idle) this.idle.target = 1;
       label = `${state} (falta clip)`;
     } else if (airborne) {
       if (state === "fall" && this.fall) {
-        targets.set(this.fall, 1);
+        this.fall.target = 1;
         label = this.fall.label;
       } else if (this.jump) {
         // El clip sigue a la física: despegue (vy = +impulso) → 0, apogeo → ½,
@@ -415,11 +415,11 @@ export class Character {
         const j = Math.max(0.1, this.config.movement.jumpSpeed);
         const progress = THREE.MathUtils.clamp((j - driver.velocity.y) / (2 * j), 0, 0.88);
         this.jump.action.time = progress * this.jump.action.getClip().duration;
-        targets.set(this.jump, 1);
+        this.jump.target = 1;
         label = `${state} ${(progress * 100).toFixed(0)}%`;
       } else {
         // Sin clip aéreo: mantener la pose actual congelada.
-        for (const s of slots) targets.set(s, s.weight);
+        for (let i = 0; i < slots.length; i++) slots[i].target = slots[i].weight;
         if (this.walk) this.walk.action.timeScale = 0;
         label = `${state} (pose congelada · falta clip)`;
       }
@@ -427,27 +427,27 @@ export class Character {
       if (state !== "idle" && speed > 0.3 && this.shoot) {
         const rate = THREE.MathUtils.clamp(speed / this.effectiveShootClipSpeed, 0.5, 1.8);
         this.shoot.action.timeScale = rate;
-        targets.set(this.shoot, 1);
+        this.shoot.target = 1;
         label = `shoot · corriendo ×${rate.toFixed(2)}`;
       } else {
         const slot = this.aim ?? this.shoot!;
-        targets.set(slot, 1);
+        slot.target = 1;
         label = "shoot · apuntando";
       }
     } else if (state === "idle") {
-      if (this.idle) targets.set(this.idle, 1);
+      if (this.idle) this.idle.target = 1;
       label = this.idle?.label ?? "idle (sin pose)";
     } else if (state === "walk" || (state === "run" && !this.run)) {
       // Ajusta la cadencia a la velocidad real para que los pies no patinen
       // (con tope: por encima, la caminata acelerada deja de verse natural).
       const rate = THREE.MathUtils.clamp(speed / clipSpeed, 0.4, 2.6);
       if (this.walk) {
-        targets.set(this.walk, 1);
+        this.walk.target = 1;
         this.walk.action.timeScale = rate;
       }
       label = state === "run" ? `run (walk ×${rate.toFixed(2)} · falta clip run)` : `walk ×${rate.toFixed(2)}`;
     } else if (state === "run" && this.run) {
-      targets.set(this.run, 1);
+      this.run.target = 1;
       const rate = THREE.MathUtils.clamp(speed / this.effectiveRunClipSpeed, 0.5, 1.8);
       this.run.action.timeScale = rate;
       label = `run ×${rate.toFixed(2)}`;
@@ -455,8 +455,9 @@ export class Character {
 
     const fade = Math.max(0.01, this.config.character.crossFade);
     const k = 1 - Math.exp(-dt / (fade / 3));
-    for (const s of slots) {
-      const target = targets.get(s) ?? 0;
+    for (let i = 0; i < slots.length; i++) {
+      const s = slots[i];
+      const target = s.target;
       s.weight += (target - s.weight) * k;
       if (Math.abs(target - s.weight) < 1e-3) s.weight = target;
       s.action.setEffectiveWeight(s.weight);
@@ -472,11 +473,13 @@ export class Character {
    * la mano derecha adelantada 25 cm hacia donde mira el personaje.
    */
   muzzleWorldPosition(target: THREE.Vector3): THREE.Vector3 {
-    const hand = this.model?.getObjectByName("mixamorigRightHand");
+    const hand = this.rightHand;
     if (!hand) return target.copy(this.root.position).setY(this.root.position.y + 1.4);
     hand.getWorldPosition(target);
     const yaw = this.root.rotation.y;
-    return target.add(new THREE.Vector3(Math.sin(yaw) * 0.25, 0, Math.cos(yaw) * 0.25));
+    target.x += Math.sin(yaw) * 0.25;
+    target.z += Math.cos(yaw) * 0.25;
+    return target;
   }
 
   setTransform(position: THREE.Vector3, yaw: number): void {

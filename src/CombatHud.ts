@@ -24,6 +24,11 @@ export class CombatHud {
   private readonly arrow: HTMLElement;
   private readonly death: HTMLElement;
   private hitTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastHealthFrac = -1;
+  private lastHealthInt = -1;
+  private lastLow = false;
+  private lastKills = -1;
+  private lastAlive = -1;
 
   constructor(container: HTMLElement) {
     this.root = el("div", "hud-combat");
@@ -58,14 +63,31 @@ export class CombatHud {
 
   setHealth(value: number, max: number): void {
     const f = Math.max(0, Math.min(1, value / max));
-    this.healthBar.style.transform = `scaleX(${f})`;
-    this.healthValue.textContent = String(Math.ceil(value));
-    this.root.classList.toggle("low", f < 0.3);
+    if (Math.abs(f - this.lastHealthFrac) > 1e-3) {
+      this.lastHealthFrac = f;
+      this.healthBar.style.transform = `scaleX(${f.toFixed(3)})`;
+    }
+    const ceilVal = Math.ceil(value);
+    if (ceilVal !== this.lastHealthInt) {
+      this.lastHealthInt = ceilVal;
+      this.healthValue.textContent = String(ceilVal);
+    }
+    const low = f < 0.3;
+    if (low !== this.lastLow) {
+      this.lastLow = low;
+      this.root.classList.toggle("low", low);
+    }
   }
 
   setCounts(kills: number, alive: number): void {
-    this.kills.textContent = String(kills);
-    this.alive.textContent = String(alive);
+    if (kills !== this.lastKills) {
+      this.lastKills = kills;
+      this.kills.textContent = String(kills);
+    }
+    if (alive !== this.lastAlive) {
+      this.lastAlive = alive;
+      this.alive.textContent = String(alive);
+    }
   }
 
   /** Marcador en la mira: blanco al pegar, rojo al matar. */

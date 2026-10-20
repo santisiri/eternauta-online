@@ -9,7 +9,7 @@
 import * as THREE from "three";
 import { SparkRenderer } from "@sparkjsdev/spark";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
-import type { GameConfig } from "./config";
+import { RESOLUTION_HEIGHT_MAP, type GameConfig } from "./config";
 import { Snowfall } from "./Snowfall";
 
 export class World {
@@ -22,6 +22,9 @@ export class World {
   private readonly hemi: THREE.HemisphereLight;
   private readonly sun: THREE.DirectionalLight;
   private resizeObserver: ResizeObserver;
+  /** Multiplicador dinámico de resolución (1 = sin reducción). */
+  private dynamicScale = 1;
+  private appliedPixelRatio = 0;
 
   constructor(
     private readonly container: HTMLElement,
@@ -41,7 +44,18 @@ export class World {
     this.scene.background = new THREE.Color(config.render.background);
 
     // Spark: un único SparkRenderer en la escena compone todos los splats.
-    this.spark = new SparkRenderer({ renderer: this.renderer });
+    // lodRaycast: 0 evita que Spark corra un segundo traverseLodTrees en worker
+    // cada 500 ms para raycasting sobre splats (las colisiones usan collider.glb).
+    const env = config.environment;
+    this.spark = new SparkRenderer({
+      renderer: this.renderer,
+      lodRaycast: 0,
+      lodSplatScale: env.lodSplatScale,
+      lodRenderScale: env.lodRenderScale,
+      maxStdDev: env.maxStdDev,
+      minAlpha: env.minAlpha,
+      minSortIntervalMs: env.minSortIntervalMs,
+    });
     this.spark.name = "spark-renderer";
     this.scene.add(this.spark);
 
@@ -66,29 +80,84 @@ export class World {
     this.resizeObserver.observe(container);
   }
 
-  /** Pixel ratio efectivo = min(devicePixelRatio, maxPixelRatio) × renderScale. */
+  /**
+   * Pixel ratio efectivo = min(devicePixelRatio, maxPixelRatio) × renderScale × dynamicScale,
+   * acotado además por `maxResolutionHeight` si se eligió un límite (1080p, 900p, 720p, etc.).
+   */
   get pixelRatio(): number {
     const r = this.config.render;
-    return Math.min(window.devicePixelRatio || 1, r.maxPixelRatio) * r.renderScale;
+    const dpr = Math.min(window.devicePixelRatio || 1, r.maxPixelRatio);
+    const scale = r.renderScale * (r.dynamicResolution ? this.dynamicScale : 1);
+    let pr = dpr * scale;
+    const maxH = r.maxResolutionHeight;
+    if (maxH > 0) {
+      const h = this.container.clientHeight || window.innerHeight || 1;
+      pr = Math.min(pr, maxH / h);
+    }
+    return Math.max(0.25, pr);
+  }
+
+  get currentDynamicScale(): number {
+    return this.config.render.dynamicResolution ? this.dynamicScale : 1;
+  }
+
+  /**
+   * Ajusta gradualmente la escala de resolución interna para mantener `render.targetFps`.
+   * Sólo redimensiona el framebuffer cuando el cambio supera el umbral de histéresis.
+   */
+  updateDynamicResolution(fps: number): void {
+    const r = this.config.render;
+    if (!r.dynamicResolution || fps <= 5) return;
+    const target = Math.max(24, r.targetFps || 60);
+    const minScale = THREE.MathUtils.clamp(r.minRenderScale || 0.55, 0.35, 1);
+    const ratio = fps / target;
+    let next = this.dynamicScale;
+    if (ratio < 0.9) {
+      // Caída de FPS: bajar resolución rápido para recuperar fluidez.
+      next = Math.max(minScale, this.dynamicScale * Math.max(0.84, ratio));
+    } else if (ratio > 1.08 && this.dynamicScale < 1) {
+      // Margen sobrante: recuperar nitidez de a poco.
+      next = Math.min(1, this.dynamicScale + 0.03);
+    }
+    if (Math.abs(next - this.dynamicScale) >= 0.025) {
+      this.dynamicScale = next;
+      const pr = this.pixelRatio;
+      if (Math.abs(pr - this.appliedPixelRatio) >= 0.02) {
+        this.resize();
+      }
+    }
   }
 
   applyRenderSettings(): void {
     const r = this.config.render;
-    this.renderer.setPixelRatio(this.pixelRatio);
+    if (r.resolutionPreset in RESOLUTION_HEIGHT_MAP) {
+      r.maxResolutionHeight = RESOLUTION_HEIGHT_MAP[r.resolutionPreset];
+    }
+    if (!r.dynamicResolution) this.dynamicScale = 1;
     this.renderer.toneMappingExposure = r.exposure;
     (this.scene.background as THREE.Color).set(r.background);
-    this.renderer.domElement.classList.toggle("pixelated", r.pixelated && r.renderScale < 1);
+    const isSubNative = r.renderScale < 1 || r.maxResolutionHeight > 0 || r.dynamicResolution;
+    this.renderer.domElement.classList.toggle("pixelated", r.pixelated && isSubNative);
+    this.renderer.domElement.classList.toggle("color-grading", r.colorGrading);
     this.camera.fov = this.config.camera.fov;
     this.camera.near = this.config.camera.near;
     this.camera.far = this.config.camera.far;
-    this.spark.lodSplatScale = this.config.environment.lodSplatScale;
+    const env = this.config.environment;
+    this.spark.lodSplatScale = env.lodSplatScale;
+    this.spark.lodRenderScale = env.lodRenderScale;
+    this.spark.maxStdDev = env.maxStdDev;
+    this.spark.minAlpha = env.minAlpha;
+    this.spark.minSortIntervalMs = env.minSortIntervalMs;
+    this.spark.setDirty();
     this.resize();
   }
 
   resize(): void {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
-    this.renderer.setPixelRatio(this.pixelRatio);
+    const pr = this.pixelRatio;
+    this.appliedPixelRatio = pr;
+    this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h, true);
     const aspect = w / h;
     this.camera.aspect = aspect;
@@ -96,6 +165,7 @@ export class World {
     const base = this.config.camera.fov;
     this.camera.fov = aspect < 1 ? Math.min(Math.max(base, this.config.camera.portraitMaxFov), base / Math.sqrt(aspect)) : base;
     this.camera.updateProjectionMatrix();
+    this.spark.setDirty();
   }
 
   get isPortrait(): boolean {
@@ -113,6 +183,16 @@ export class World {
   }
 
   render(): void {
+    // Evita ejecutar pasadas MRT de SplatAccumulator.generate() (2,5M splats) en frames
+    // donde un ordenamiento asíncrono ya está en vuelo o aún no venció minSortIntervalMs.
+    // Spark igualmente reproyecta `spark.display` a la matriz exacta de la cámara actual
+    // en `onBeforeRender` mediante `accumToCamera`.
+    const now = performance.now();
+    this.spark.autoUpdate =
+      !this.spark.sorting &&
+      (this.spark.activeSplats === 0 ||
+        this.spark.dirty ||
+        now - this.spark.lastSortTime >= this.spark.minSortIntervalMs);
     this.renderer.render(this.scene, this.camera);
   }
 
